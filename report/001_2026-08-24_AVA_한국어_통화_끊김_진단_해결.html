@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>Report #001 — AVA 한국어 통화 끊김 문제 진단 및 해결</title>
+<style>
+@page { size: A4; margin: 18mm 16mm; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: "Malgun Gothic", "맑은 고딕", sans-serif;
+       font-size: 10.5pt; line-height: 1.65; color: #1a1a1a; background: #fff; }
+.sheet { max-width: 180mm; margin: 0 auto; padding: 24px 16px; }
+@media print { .sheet { max-width: none; padding: 0; } }
+
+.report-header { border-bottom: 3px solid #1a3a5c; padding-bottom: 12px; margin-bottom: 20px; }
+.report-no { font-size: 9pt; letter-spacing: 2px; color: #1a3a5c; font-weight: bold; }
+h1 { font-size: 17pt; color: #1a3a5c; margin: 4px 0 8px; }
+.meta { font-size: 9pt; color: #555; }
+.meta span { margin-right: 16px; }
+
+h2 { font-size: 13pt; color: #1a3a5c; margin: 26px 0 10px; padding: 6px 10px;
+     background: #eef3f8; border-left: 4px solid #1a3a5c; page-break-after: avoid; }
+h3 { font-size: 11pt; margin: 14px 0 6px; page-break-after: avoid; }
+p { margin: 6px 0; }
+ul, ol { margin: 6px 0 6px 22px; }
+li { margin: 3px 0; }
+
+.summary-box { background: #f4f8f4; border: 1.5px solid #2e7d32; border-radius: 4px;
+               padding: 12px 16px; margin: 14px 0; page-break-inside: avoid; }
+.summary-box h3 { color: #2e7d32; margin-top: 0; }
+
+.item { border: 1px solid #ccc; border-radius: 4px; margin: 12px 0; page-break-inside: avoid; overflow: hidden; }
+.item-head { padding: 7px 12px; font-weight: bold; font-size: 10.5pt; color: #fff; }
+.item-body { padding: 10px 14px; }
+.sev-critical .item-head { background: #b71c1c; }
+.sev-high     .item-head { background: #e65100; }
+.sev-medium   .item-head { background: #b58900; }
+.fix { background: #f0f6f0; border-left: 3px solid #2e7d32; padding: 6px 10px; margin-top: 8px; font-size: 10pt; }
+.fix b { color: #2e7d32; }
+
+table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 9.5pt; }
+th, td { border: 1px solid #999; padding: 5px 8px; text-align: left; vertical-align: top; }
+th { background: #eef3f8; color: #1a3a5c; }
+tr { page-break-inside: avoid; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.bad { color: #b71c1c; font-weight: bold; }
+.good { color: #2e7d32; font-weight: bold; }
+
+code { font-family: Consolas, "Courier New", monospace; font-size: 9pt;
+       background: #f2f2f2; padding: 1px 4px; border-radius: 3px; }
+.mono-block { font-family: Consolas, monospace; font-size: 8.5pt; background: #f7f7f7;
+              border: 1px solid #ddd; border-radius: 3px; padding: 8px 10px; margin: 6px 0;
+              white-space: pre; overflow-x: hidden; line-height: 1.5; }
+
+.next-box { background: #fff8ec; border: 1.5px solid #e65100; border-radius: 4px;
+            padding: 12px 16px; margin: 16px 0; page-break-inside: avoid; }
+.next-box h3 { color: #e65100; margin-top: 0; }
+
+.footer { margin-top: 28px; padding-top: 8px; border-top: 1px solid #999;
+          font-size: 8.5pt; color: #777; display: flex; justify-content: space-between; }
+.small { font-size: 9pt; color: #555; }
+</style>
+</head>
+<body>
+<div class="sheet">
+
+<div class="report-header">
+  <div class="report-no">REPORT #001</div>
+  <h1>AVA 한국어 통화 끊김 문제 — 진단 및 해결</h1>
+  <div class="meta">
+    <span><b>날짜</b> 2026-08-24</span>
+    <span><b>프로젝트</b> AVA (AI Voice Agent for Asterisk)</span>
+    <span><b>대상</b> openai_realtime 프로바이더 · 강남구청 당직실 응대 봇</span>
+  </div>
+</div>
+
+<div class="summary-box">
+  <h3>결론 요약</h3>
+  <p>"한글 프롬프트를 쓰면 AI 말이 계속 끊긴다"는 <b>하나의 증상 뒤에 서로 다른 문제 5건</b>이 겹쳐 있었다.
+  핵심 원인은 오디오 송출 페이서(pacer)의 버그 2건 — <b>① 미재생 버퍼 조기 폐기</b>, <b>② 타이밍 드리프트로 인한
+  재생 중 무음 구멍</b> — 이며, 에코 오인식·설정 오버라이드 혼선·입력 게인 미설정이 이를 가리고 증폭시켰다.
+  수정 후 검증 통화에서 인사말 5.1초·답변 14.7초/14.8초가 <b>손실 0으로 전체 재생</b>됨을 로그로 확인했다.</p>
+</div>
+
+<h2>1. 증상</h2>
+<ul>
+  <li>한국어 응대 시 AI 발화가 재생 3~5초 지점에서 잘림. 심할 때는 인사말이 <b>"안녕하..." 0.5초 만에 중단</b>.</li>
+  <li>재생 중 말이 0.5~1.5초 조각으로 나오고 사이에 1~3.5초 무음 (통화 녹음 파형 분석으로 확인).</li>
+  <li>STT 인식 뭉개짐: "종량제 봉투" → "종양제 봉투", "봉양제 봉퉁". 민원인 측 "전화가 잘 안들립니다".</li>
+  <li>영어 기본 프롬프트에서는 증상이 나타나지 않아 "한국어 문제"로 오인하기 쉬웠음.</li>
+</ul>
+
+<h2>2. 발견된 문제와 대응 (심각도순)</h2>
+
+<div class="item sev-critical">
+  <div class="item-head">문제 1 · 심각 — 송출 페이서 조기 종료 (뒷부분 통째 손실)</div>
+  <div class="item-body">
+    <p><b>위치</b>: <code>src/providers/openai_realtime.py : _emit_audio_done()</code></p>
+    <p>OpenAI는 오디오를 재생 속도보다 2~3배 빨리 생성해 보낸다. 생성 완료(<code>response.done</code>) 신호가
+    오면 이 함수가 <b>아직 재생되지 않은 버퍼(<code>_outbuf</code>)를 남긴 채 페이서를 즉시 취소</b>했다.
+    끊기는 시점 = 생성에 걸린 시간이 되므로, 답이 길수록(한국어 존댓말) 잘리는 분량이 커진다.
+    18:10 통화 실측: OpenAI가 보낸 인사말 약 2.7초 이상 중 <b>0.5초만 재생</b>.</p>
+    <div class="fix"><b>대응</b>: 완료 신호를 올리기 전에 <code>_outbuf</code>가 빌 때까지(최대 60초 가드)
+    페이서가 실제 오디오를 전부 내보내도록 드레인 대기를 추가. 취소·barge-in 경로는 버퍼를 먼저 비우므로 영향 없음.</div>
+  </div>
+</div>
+
+<div class="item sev-critical">
+  <div class="item-head">문제 2 · 심각 — 페이서 타이밍 드리프트 (재생 중 무음 구멍)</div>
+  <div class="item-body">
+    <p><b>위치</b>: <code>src/providers/openai_realtime.py : _pacer_loop()</code></p>
+    <p>20ms 주기 송출을 <code>sleep(0.02)</code> 상대 대기로 구현해 반복당 처리 시간이 누적, 실제 주기가
+    ~23ms로 밀려 <b>공급 속도가 재생 속도보다 약 14% 느렸다</b> (로그 <code>drift_pct=-8~-15</code>).
+    재생 1~1.5초마다 지터 버퍼가 고갈되어 소리가 멈췄다 이어지는 패턴 발생 — 통화 녹음 파형의
+    "1초 발화 + 1~3초 무음" 반복과 정확히 일치. 네트워크는 핑 1ms 미만·손실 0%로 결백.</p>
+    <div class="fix"><b>대응</b>: 절대시각(monotonic deadline) 스케줄링으로 재작성 — 처리 시간과 무관하게
+    20ms 주기를 유지하고, 밀리면 대기를 건너뛰어 따라잡으며, 0.5초 이상 정체 시 재동기화.
+    부하 원인이던 매 20ms <code>PROVIDER CHUNK</code> INFO 로그도 50청크당 1회로 축소
+    (<code>src/engine.py</code>).</div>
+  </div>
+</div>
+
+<div class="item sev-high">
+  <div class="item-head">문제 3 · 높음 — 에코/잡음이 발화로 오인되어 재생 플러시</div>
+  <div class="item-body">
+    <p><b>위치</b>: <code>src/engine.py</code> (ProviderBargeIn 처리), <code>openai_realtime.py</code> (speech_started 처리)</p>
+    <p>설정에서 <code>barge_in.enabled: false</code>로 꺼도 <b>프로바이더 이벤트 경로는 이 플래그를 확인하지
+    않았다</b>. OpenAI 서버 VAD가 AI 자신의 에코·회선 잡음을 상대 발화로 오인
+    (입력 트랜스크립트에 "Watch", "Bye", "Oh" 등 무의미 조각으로 기록됨) →
+    <code>speech_started</code>마다 재생 버퍼 플러시·응답 취소 발생. 맞장구가 없는 통화에서도 재현됨.</p>
+    <div class="fix"><b>대응</b>: 반이중(half-duplex) 게이팅 — barge-in 비활성 시 AI가 말하는 동안
+    (실제 재생 활성 신호 <code>_agent_output_active_calls</code> 기준, 재생 완전 종료 후 600ms까지)
+    발신자 오디오를 <b>무음으로 치환해 OpenAI에 전송</b>. Google Live에 이미 있던 방식을 확장 적용.
+    에코가 OpenAI에 도달하지 않으므로 오인식 원천 차단.
+    <span class="small">(초기 버전은 TTS 토큰 기준이라 토큰이 재생 완료 전에 해제되어 실패 → 재생-드레인 신호로 교체)</span></div>
+  </div>
+</div>
+
+<div class="item sev-medium">
+  <div class="item-head">문제 4 · 중간 — 설정 오버라이드 혼선 (한글 프롬프트 미적용)</div>
+  <div class="item-body">
+    <p><b>위치</b>: <code>config/ai-agent.local.yaml</code></p>
+    <p>Admin UI가 관리하는 오버라이드 파일이 <code>instructions</code>를 영어 프롬프트로 덮어쓰고 있어,
+    main YAML에 넣은 한글 프롬프트는 <b>실제로 적용된 적이 없었다</b>. 병합 규칙: 같은 키는 local이
+    항상 우선, local에 없는 키는 base 적용 — 그래서 <code>greeting</code>(local에 없음)만 한글로 나와
+    "반은 한글, 반은 영어"인 혼란 상태였음.</p>
+    <div class="fix"><b>대응</b>: 양쪽 파일 모두 강남구청 당직실 한글 프롬프트(+ "한 번에 한두 문장씩 짧게"
+    규칙)로 통일. 이후 프롬프트 변경은 Admin UI(→ local.yaml) 한 곳에서만 할 것.
+    엔진 시작 로그의 <code>overridden_keys</code>로 어떤 키가 덮이는지 확인 가능.</div>
+  </div>
+</div>
+
+<div class="item sev-medium">
+  <div class="item-head">문제 5 · 중간 — 인입 음성 게인 미설정 (STT 뭉개짐)</div>
+  <div class="item-body">
+    <p><b>위치</b>: <code>config/ai-agent.yaml : providers.openai_realtime</code></p>
+    <p><code>input_gain_target_rms: 0 / input_gain_max_db: 0</code>으로 입력 정규화가 꺼져 있어, 조용한
+    전화망 오디오(rms 한 자릿수 관측)가 증폭 없이 OpenAI로 전달 → "종량제→종양제" 수준의 인식 오류.</p>
+    <div class="fix"><b>대응</b>: <code>input_gain_target_rms: 1400</code>, <code>input_gain_max_db: 18</code> 활성화.
+    아울러 서버 VAD <code>turn_detection.threshold</code>를 0.5 → 0.8로 상향(에코·잡음 오인 감소).
+    수정 후 "부청장 이름이 뭐야?", "강남 오는 날씨는?" 등 정상 인식 확인.</div>
+  </div>
+</div>
+
+<h2>3. 왜 "한국어만" 끊기는 것처럼 보였나</h2>
+<p>언어 자체는 원인이 아니었다. 변수는 <b>응답 길이</b>다.</p>
+<ul>
+  <li><b>영어 기본 프롬프트</b>: "5~8단어로 답하라" → 응답 1~2초 → 생성 시간 ≈ 재생 시간이라
+      문제 1(조기 종료)의 손실이 없고, 문제 2(드리프트)의 버퍼 고갈이 일어나기 전에 재생이 끝난다.</li>
+  <li><b>한국어 존댓말 응대</b>: 응답 5~15초 → 생성이 재생보다 수 초 먼저 끝나 뒷부분이 잘리고(문제 1),
+      드리프트 누적으로 중간에 구멍이 뚫리며(문제 2), 에코 노출 시간도 길어진다(문제 3).</li>
+</ul>
+<p class="small">※ 실제로 영어 프롬프트가 적용돼 있던 오후 통화들에서도 끊김 이벤트가 로그에 동일하게
+기록되어 있었다 — 짧은 응답 덕에 체감되지 않았을 뿐이다.</p>
+
+<h2>4. 수정 전후 검증 (엔진 로그 실측)</h2>
+<table>
+  <tr><th>항목</th><th>수정 전 (18:10 통화)</th><th>수정 후 (20:07 / 20:29 통화)</th></tr>
+  <tr><td>인사말 재생</td><td class="bad">0.5초에서 잘림 ("안녕하...")</td><td class="good">4.96초 / 5.12초 전체 재생</td></tr>
+  <tr><td>긴 답변 재생</td><td class="bad">생성 완료 시점(3~5초)에서 중단, 잔여분 폐기</td><td class="good">8.3 / 14.7 / 14.8 / 14.9초 전체 재생 (enqueued_ratio 1.0)</td></tr>
+  <tr><td>재생 드리프트</td><td class="bad">-14.3% (버퍼 고갈로 중간 무음)</td><td class="good">-8.6 ~ -10% (잔여분은 워밍업 0.32초 + 종료 대기 지표 포함분)</td></tr>
+  <tr><td>재생 중 끊김 이벤트</td><td class="bad">AI 발화 중 speech_started → 플러시 반복 (90초에 8회)</td><td class="good">발화 종료·드레인 완료 후에만 발생 (정상 턴 전환)</td></tr>
+  <tr><td>STT 인식</td><td class="bad">"종양제 봉투", "봉양제 봉퉁", junk("Watch","Bye")</td><td class="good">"부청장 이름이 뭐야?", "강남 오는 날씨는?" 정상 인식</td></tr>
+</table>
+
+<h3>통화 녹음 파형 분석 (20:15 통화, 31.5초, 100ms RMS)</h3>
+<p class="small">문제 2 확정에 사용한 근거. AI 음량은 정상(RMS 2000~5000)이나 발화가 조각나 있음:</p>
+<div class="mono-block">3.1–3.9s 발화(0.8s) | 4.0–5.4s 무음 | 5.5–6.7s 발화(1.2s) | 7.0–9.3s 무음(2.4s)
+9.4–9.9s 발화(0.5s) | 10.0–13.4s 무음(3.4s) | ... (이하 동일 패턴 반복)</div>
+
+<h2>5. 변경 파일 요약</h2>
+<table>
+  <tr><th>파일</th><th>변경</th><th>목적</th></tr>
+  <tr><td><code>src/providers/openai_realtime.py</code></td><td>_emit_audio_done에 버퍼 드레인 대기 추가 / _pacer_loop 절대시각 스케줄링</td><td>문제 1·2 (핵심 버그)</td></tr>
+  <tr><td><code>src/engine.py</code></td><td>반이중 에코 게이팅(무음 치환, 재생-드레인 기준 + 600ms 꼬리) / PROVIDER CHUNK 로그 축소</td><td>문제 3 · 부하 감소</td></tr>
+  <tr><td><code>config/ai-agent.yaml</code></td><td>threshold 0.8 / 입력 게인 정규화 / 한글 프롬프트</td><td>문제 3·5</td></tr>
+  <tr><td><code>config/ai-agent.local.yaml</code></td><td>영어 오버라이드 → 한글 프롬프트로 교체</td><td>문제 4</td></tr>
+</table>
+
+<div class="next-box">
+  <h3>남은 과제 · 권장 조치</h3>
+  <ol>
+    <li><b>최종 체감 확인</b>: 20:29 통화 지표는 정상 — 실제 청취에서 멈칫거림이 사라졌는지 확인 후 종결.</li>
+    <li><b>협력자 인스턴스 반영</b>: 코드 수정 2건(문제 1·2·3)과 설정은 협력자 AVA에도 동일 적용해야 같은 품질이 나온다.</li>
+    <li><b>커밋 및 업스트림</b>: 페이서 버그 2건은 업스트림 오픈소스(AVA) 공통 결함으로 판단 — 커밋 정리 후 PR 검토 권장.</li>
+    <li><b>에코 꼬리 미세 조정</b>: 발화 종료 직후 junk 인식("I shamble my")이 남으면 꼬리 보호 600ms → 800ms~1s 연장.</li>
+    <li><b>트레이드오프 인지</b>: 반이중 게이팅 중에는 AI 발화 도중 말을 얹어 끊는 barge-in 불가 (현재 정책과 동일).</li>
+  </ol>
+</div>
+
+<div class="footer">
+  <span>AVA — AI Voice Agent for Asterisk</span>
+  <span>Report #001 · 2026-08-24</span>
+</div>
+
+</div>
+</body>
+</html>

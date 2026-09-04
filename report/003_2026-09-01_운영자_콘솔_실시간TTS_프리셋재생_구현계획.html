@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>Report #003 — 운영자 콘솔(실시간 TTS 송출 + 프리셋 음성 재생) 구현 계획</title>
+<style>
+@page { size: A4; margin: 18mm 16mm; }
+* { box-sizing: border-box; }
+body { font-family: "Malgun Gothic", "맑은 고딕", sans-serif;
+       font-size: 10.5pt; line-height: 1.65; color: #1a1a1a; background: #fff; margin: 0; }
+.sheet { max-width: 180mm; margin: 0 auto; padding: 24px 16px; }
+@media print { .sheet { max-width: none; padding: 0; } }
+h1 { font-size: 17pt; margin: 4px 0 2px; }
+h2 { font-size: 13pt; margin: 26px 0 8px; padding-bottom: 4px;
+     border-bottom: 2px solid #2c5f8a; color: #2c5f8a; page-break-after: avoid; }
+h3 { font-size: 11pt; margin: 16px 0 6px; page-break-after: avoid; }
+.report-no { font-size: 9.5pt; letter-spacing: 2px; color: #2c5f8a; font-weight: bold; }
+.meta { font-size: 9pt; color: #555; margin: 2px 0 0; }
+.header { border-bottom: 3px solid #2c5f8a; padding-bottom: 10px; margin-bottom: 16px; }
+.summary-box { background: #eef4fa; border: 1px solid #b9cfe4; border-left: 5px solid #2c5f8a;
+               padding: 10px 14px; margin: 14px 0; page-break-inside: avoid; }
+.summary-box b { color: #2c5f8a; }
+.item { page-break-inside: avoid; margin: 10px 0; }
+table { border-collapse: collapse; width: 100%; font-size: 9.5pt; margin: 8px 0; }
+th, td { border: 1px solid #999; padding: 5px 8px; text-align: left; vertical-align: top; }
+th { background: #e8eef4; }
+tr { page-break-inside: avoid; }
+code { font-family: Consolas, "D2Coding", monospace; font-size: 9pt;
+       background: #f2f2f2; padding: 1px 4px; border-radius: 2px; }
+.flow { font-family: Consolas, monospace; font-size: 9pt; background: #f7f7f7;
+        border: 1px solid #ddd; padding: 10px 12px; white-space: pre; overflow-x: auto;
+        page-break-inside: avoid; }
+.phase { border: 1px solid #ccc; border-radius: 4px; padding: 8px 12px; margin: 8px 0;
+         page-break-inside: avoid; }
+.phase h3 { margin-top: 0; }
+.tag { display: inline-block; font-size: 8.5pt; font-weight: bold; padding: 1px 8px;
+       border-radius: 10px; margin-right: 6px; }
+.tag-green { background: #d8efd8; color: #1e6b1e; }
+.tag-orange { background: #fde8cf; color: #a05a00; }
+.tag-red { background: #fadcdc; color: #a11a1a; }
+.warn-box { background: #fdf3e3; border: 1px solid #e8c98a; border-left: 5px solid #d99a2b;
+            padding: 10px 14px; margin: 14px 0; page-break-inside: avoid; }
+.next-box { background: #e9f5e9; border: 1px solid #a8d1a8; border-left: 5px solid #3a8a3a;
+            padding: 10px 14px; margin: 14px 0; page-break-inside: avoid; }
+.footer { margin-top: 30px; padding-top: 8px; border-top: 1px solid #999;
+          font-size: 8.5pt; color: #666; display: flex; justify-content: space-between; }
+ul, ol { margin: 4px 0 8px; padding-left: 22px; }
+li { margin: 2px 0; }
+</style>
+</head>
+<body>
+<div class="sheet">
+
+<div class="header">
+  <div class="report-no">REPORT #003</div>
+  <h1>운영자 콘솔 구현 계획 — 실시간 TTS 송출 + 프리셋 음성 재생</h1>
+  <p class="meta">날짜: 2026-09-01 · 프로젝트: AVA (AI Voice Agent for Asterisk) · 대상: src/engine.py, admin_ui, Asterisk(변경 없음)</p>
+</div>
+
+<div class="summary-box">
+  <b>결론:</b> 세 기능(① 통화 중 키패드 DTMF 수신, ② 텍스트박스 입력 → 실시간 TTS 송출, ③ 프리셋 음성 클릭 재생)
+  모두 <b>AVA 쪽(AI 엔진 + Admin UI)</b>에 구현한다. <b>Asterisk에는 새로 올릴 것이 없다</b> —
+  음성 재생은 기존 ARI 재생 경로(PlaybackManager)를 그대로 재사용하고, DTMF는 이미 엔진에 도착하고 있는
+  <code>ChannelDtmfReceived</code> 이벤트를 확장 처리하면 된다.
+  Asterisk 쪽 확인 사항은 pjsip 엔드포인트의 <code>dtmf_mode=rfc4733</code>(또는 auto) 하나뿐이다.
+</div>
+
+<h2>1. 왜 AVA 쪽인가</h2>
+<div class="item">
+<ul>
+  <li>통화가 AVA에 연결된 순간 채널은 <b>Stasis(ARI) 앱 내부</b>에 있다. 이 상태에서는 dialplan의
+      <code>Read()</code>·<code>Playback()</code> 같은 Asterisk 기능이 개입할 수 없고, 모든 제어(재생·DTMF 수신)는
+      ARI를 통해 엔진이 한다.</li>
+  <li>필요한 기반이 이미 코드에 있다:
+    <ul>
+      <li>DTMF 이벤트 구독: <code>src/engine.py:782</code> (<code>ChannelDtmfReceived</code> 핸들러 등록)</li>
+      <li>DTMF 수신 지점: <code>src/engine.py:8689</code> <code>_handle_dtmf_received</code> — 현재는 어텐디드 전환
+          상담원 채널만 처리, 발신자 채널 digit은 버림 → 여기를 확장</li>
+      <li>AudioSocket DTMF: <code>src/engine.py:11903</code> <code>_audiosocket_handle_dtmf</code> — 현재 로그만 남김</li>
+      <li>음성 재생: <code>src/core/playback_manager.py</code> PlaybackManager — 파일 생성 → ARI 재생, 재생 ID·게이팅·중단 처리 완비</li>
+      <li>TTS 합성: 인사말 파일 기능(greeting_file, OpenAI TTS)에서 이미 텍스트→wav 합성 경로 구현됨 → 재사용</li>
+      <li>UI 기반: <code>admin_ui</code>(FastAPI + React), 실시간 상태 허브 <code>admin_ui/backend/api/live_status.py</code>(SSE StatusHub) 존재</li>
+    </ul>
+  </li>
+</ul>
+</div>
+
+<h2>2. 전체 아키텍처</h2>
+<div class="flow">[운영자 브라우저: Admin UI "운영자 콘솔" 페이지]
+   │  ① 텍스트 입력/프리셋 클릭 (HTTP POST)      ② 콜 목록·DTMF·재생상태 (SSE 수신)
+   ▼
+[Admin UI Backend (FastAPI)]  admin_ui/backend/api/operator.py (신규)
+   │  엔진 제어 API 프록시 (HTTP)
+   ▼
+[AI Engine]  src/ (신규 operator 제어 엔드포인트)
+   ├─ say:    텍스트 → TTS 합성(wav, media_dir) → PlaybackManager.play → 발신자 채널
+   ├─ play:   프리셋 ID → 등록된 음성 파일 → PlaybackManager.play → 발신자 채널
+   ├─ 게이팅:  운영자 음성 재생 중 AI 응답 억제/중단 (ConversationCoordinator 연동)
+   └─ DTMF:   _handle_dtmf_received 확장 → 세션에 기록 + StatusHub로 push
+   ▼
+[Asterisk]  기존 ARI 재생 경로 그대로 (변경 없음, dtmf_mode=rfc4733 확인만)</div>
+
+<h2>3. 구성요소별 작업 내역</h2>
+
+<h3>3-1. AI 엔진 — 운영자 제어 API (신규)</h3>
+<div class="item">
+<table>
+<tr><th style="width:28%">엔드포인트</th><th>동작</th></tr>
+<tr><td><code>GET /operator/calls</code></td><td>활성 콜 목록(call_id, 발신번호, 상태, 경과시간) — SessionStore에서 조회</td></tr>
+<tr><td><code>POST /operator/calls/{id}/say</code></td><td>body: <code>{text, voice}</code> → TTS 합성 → 발신자 채널에 재생. 재생 전 AI 발화 중단(barge-in 로직 재사용)</td></tr>
+<tr><td><code>POST /operator/calls/{id}/play</code></td><td>body: <code>{preset_id}</code> → 프리셋 파일 즉시 재생 (TTS 합성 없음 → 지연 최소)</td></tr>
+<tr><td><code>POST /operator/calls/{id}/stop</code></td><td>진행 중인 운영자 재생 중단</td></tr>
+<tr><td><code>GET /operator/presets</code></td><td>프리셋 목록(ID, 라벨, 길이) 반환</td></tr>
+</table>
+<ul>
+  <li>인증: Admin UI backend ↔ 엔진 사이 기존 내부 토큰 방식 준용, 외부 직접 노출 금지.</li>
+  <li>재생 대상: 발신자 채널(또는 브리지). 운영자 재생 중 AI 스트리밍 오디오는 게이팅으로 억제 —
+      OpenAI Realtime 사용 시 <code>response.cancel</code> + 출력 버퍼 클리어(기존 인터럽트 처리 재사용).</li>
+  <li>대화 컨텍스트 처리: 운영자가 말한 텍스트를 대화 이력에 "assistant(운영자 대리)" 발화로 주입해
+      AI가 이후 문맥을 이어가게 한다(say는 텍스트가 있으므로 그대로 주입, 프리셋은 등록 시 저장한 전사 텍스트 주입).</li>
+</ul>
+</div>
+
+<h3>3-2. TTS 합성 경로 (재사용)</h3>
+<div class="item">
+<ul>
+  <li>greeting_file 기능에서 구현한 OpenAI TTS(예: alloy) 합성 함수를 공용 유틸로 추출.</li>
+  <li>합성 결과 wav는 PlaybackManager의 <code>media_dir</code>(<code>/mnt/asterisk_media/ai-generated</code>)에 저장 → 기존 파일 수명 관리에 편승.</li>
+  <li>예상 지연: 합성 ~0.5–1.5초 + 재생 시작 ~0.2초. 1차 목표로 충분. (스트리밍 TTS 주입은 Phase 4 옵션)</li>
+</ul>
+</div>
+
+<h3>3-3. 프리셋 음성 관리</h3>
+<div class="item">
+<ul>
+  <li>저장: <code>assets/operator_presets/&lt;lang&gt;/</code> + 메타데이터(<code>config/ai-agent.yaml</code>의 <code>operator.presets</code> 섹션 또는 별도 json): id, 라벨, 파일, 전사 텍스트, 정렬 순서.</li>
+  <li>등록 방법 2가지: (a) Admin UI에서 텍스트 입력 → TTS로 생성·저장, (b) 음성 파일 업로드.</li>
+  <li>예시 프리셋: "잠시만 기다려 주세요", "상담원을 연결해 드리겠습니다", "업무시간 안내" 등.</li>
+</ul>
+</div>
+
+<h3>3-4. Admin UI — "운영자 콘솔" 페이지 (신규)</h3>
+<div class="item">
+<ul>
+  <li><code>admin_ui/backend/api/operator.py</code>: 엔진 제어 API 프록시 + 프리셋 CRUD.</li>
+  <li><code>admin_ui/frontend/src/pages/OperatorConsolePage.tsx</code>: 좌측 활성 콜 목록(선택), 중앙 텍스트박스(Enter=송출) + 최근 송출 이력, 우측 프리셋 버튼 그리드(클릭 즉시 재생), 상단 재생 상태/중지 버튼.</li>
+  <li>실시간 갱신: 기존 <code>live_status.py</code> StatusHub(SSE)에 <code>operator</code> 컴포넌트 채널 추가 — 콜 목록 변동, 재생 시작/종료, DTMF 수신을 push.</li>
+</ul>
+</div>
+
+<h3>3-5. DTMF 수신 (1번째 질문 항목)</h3>
+<div class="item">
+<ul>
+  <li><code>src/engine.py:8689</code> <code>_handle_dtmf_received</code> 확장: 어텐디드 전환 채널이 아니면 → 발신자 채널의 digit을 세션 digit 버퍼에 누적 + 콜 이력 기록 + StatusHub push(콘솔에 실시간 표시).</li>
+  <li>활용처: 운영자 콘솔에 표시(예: 고객이 주민번호 뒷자리 입력), 추후 AI 툴(digit 수집 요청)로 확장 가능.</li>
+  <li>Asterisk 확인 사항(유일): pjsip 엔드포인트 <code>dtmf_mode=rfc4733</code> 또는 <code>auto</code> — inband 전용이면 이벤트가 도착하지 않음.</li>
+</ul>
+</div>
+
+<h2>4. 단계별 로드맵</h2>
+
+<div class="phase">
+<h3><span class="tag tag-green">Phase 1</span>프리셋 음성 클릭 재생 (예상 1–2일)</h3>
+<ul>
+  <li>엔진 <code>/operator/calls</code>, <code>/operator/calls/{id}/play</code>, <code>/operator/presets</code></li>
+  <li>프리셋 메타데이터 + 샘플 프리셋 3개(TTS 생성)</li>
+  <li>콘솔 페이지 최소 버전: 콜 목록 + 프리셋 버튼</li>
+  <li>TTS 합성이 없어 가장 단순 — 재생·게이팅 경로를 여기서 먼저 검증</li>
+</ul>
+</div>
+
+<div class="phase">
+<h3><span class="tag tag-green">Phase 2</span>텍스트박스 실시간 TTS 송출 (예상 1–2일)</h3>
+<ul>
+  <li><code>/say</code> 엔드포인트 + greeting_file TTS 유틸 공용화</li>
+  <li>콘솔 텍스트박스 + 송출 이력, 합성 중 스피너/재생 상태 표시</li>
+  <li>운영자 발화 텍스트의 대화 컨텍스트 주입</li>
+</ul>
+</div>
+
+<div class="phase">
+<h3><span class="tag tag-orange">Phase 3</span>DTMF 실시간 표시 + 운영 편의 (예상 1일)</h3>
+<ul>
+  <li><code>_handle_dtmf_received</code> 확장 + SSE push + 콘솔 표시</li>
+  <li>재생 중지 버튼, 프리셋 관리 UI(생성/업로드/삭제)</li>
+</ul>
+</div>
+
+<div class="phase">
+<h3><span class="tag tag-orange">Phase 4 (옵션)</span>고급 기능</h3>
+<ul>
+  <li>스트리밍 TTS 주입(ExternalMedia/AudioSocket 경로)으로 지연 0.5초 이하</li>
+  <li>AI 일시정지/재개 토글(운영자 수동 개입 모드), 실시간 전사 뷰</li>
+</ul>
+</div>
+
+<h2>5. 리스크 및 주의사항</h2>
+<div class="warn-box">
+<ul>
+  <li><span class="tag tag-red">중요</span><b>AI와 운영자 음성 충돌</b>: 운영자 재생 중 AI가 동시에 말하면 겹침.
+      재생 시작 시 반드시 AI 응답 취소 + 재생 종료까지 신규 응답 억제(기존 barge-in/게이팅 코드 재사용이 핵심).</li>
+  <li><b>AI가 운영자 음성을 "듣는" 문제</b>: 재생 오디오가 발신자 → AI 입력으로 에코되지는 않지만(ARI 재생은 수신 방향),
+      발신자가 운영자 음성에 대답하면 AI는 맥락 없이 듣게 됨 → 3-1의 컨텍스트 주입으로 해결.</li>
+  <li><b>90 운영서버(운영서버) 배포 주의</b>: 운영본이므로 로컬/스테이징 검증 후 배포. 엔진 재시작이 필요하므로 통화 없는 시간대에 진행.</li>
+  <li><b>보안</b>: 운영자 API는 통화에 직접 개입하므로 Admin UI 인증 뒤에만 두고 엔진 포트는 외부 비노출 유지.</li>
+</ul>
+</div>
+
+<h2>6. 권장 다음 단계</h2>
+<div class="next-box">
+<ol>
+  <li>Phase 1부터 착수 — 프리셋 재생으로 "엔진 제어 API → PlaybackManager → 발신자" 경로 검증</li>
+  <li>pjsip <code>dtmf_mode</code> 설정 확인 (90 서버, 테스트 환경 둘 다)</li>
+  <li>프리셋 문구 목록 확정 (운영에서 실제로 자주 쓰는 안내 문구 기준)</li>
+</ol>
+</div>
+
+<div class="footer">
+  <span>AVA — AI Voice Agent for Asterisk</span>
+  <span>Report #003 · 2026-09-01</span>
+</div>
+
+</div>
+</body>
+</html>

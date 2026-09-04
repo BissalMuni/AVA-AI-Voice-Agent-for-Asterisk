@@ -1,0 +1,17 @@
+# Windows (Docker Desktop) override — 호스트 네트워킹 대신 bridge + 포트 매핑.
+# 사용: docker compose -f docker-compose.yml -f docker-compose.windows.yml up -d --build ai_engine admin_ui
+# 근거: .env.example "Tier 3 / Best-effort hosts (Docker Desktop...)" 절.
+services:
+  ai_engine:
+    network_mode: !reset null
+    ports:
+      - "8090:8090"    # AudioSocket — 서버 Asterisk가 TCP로 접속할 포트
+      - "15000:15000"  # health / metrics
+    environment:
+      # bridge 모드에서는 컨테이너 밖(서버 Asterisk)에서 접속해야 하므로 0.0.0.0 바인드
+      - AUDIOSOCKET_HOST=0.0.0.0
+
+  admin_ui:
+    network_mode: !reset null
+    ports:
+      - "3003:3003"    # Admin UI

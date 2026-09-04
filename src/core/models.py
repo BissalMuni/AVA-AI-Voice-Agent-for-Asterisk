@@ -143,6 +143,11 @@ class CallSession:
     connection_audio_playback_id: Optional[str] = None
     connection_audio_media_uri: Optional[str] = None
     connection_audio_started_ts: float = 0.0
+    # Recorded greeting (provider `greeting_file`): an Asterisk sound played to
+    # the caller at provider start instead of an AI-synthesized greeting.
+    greeting_file_playback_id: Optional[str] = None
+    greeting_file_media_uri: Optional[str] = None
+    greeting_file_started_ts: float = 0.0
     created_at: float = field(default_factory=time.time)
     agent_audio_buffer: bytearray = field(default_factory=bytearray)
     last_agent_audio_ts: float = 0.0

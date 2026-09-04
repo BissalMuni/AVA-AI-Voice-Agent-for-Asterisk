@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>Report #002 — AVA 90 서버(Windows) 마이그레이션 가이드</title>
+<style>
+@page { size: A4; margin: 18mm 16mm; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: "Malgun Gothic", "맑은 고딕", sans-serif;
+       font-size: 10.5pt; line-height: 1.65; color: #1a1a1a; background: #fff; }
+.sheet { max-width: 180mm; margin: 0 auto; padding: 24px 16px; }
+@media print { .sheet { max-width: none; padding: 0; } }
+
+.report-header { border-bottom: 3px solid #1a1a1a; padding-bottom: 12px; margin-bottom: 18px; }
+.report-no { font-size: 9pt; letter-spacing: 2px; color: #555; font-weight: bold; }
+h1 { font-size: 17pt; margin: 4px 0 6px; line-height: 1.35; }
+.meta { font-size: 9pt; color: #555; }
+.meta span + span::before { content: " · "; color: #aaa; }
+
+h2 { font-size: 12.5pt; margin: 22px 0 8px; padding: 5px 10px;
+     background: #f0f0f0; border-left: 5px solid #1a1a1a; page-break-after: avoid; }
+h3 { font-size: 11pt; margin: 14px 0 6px; page-break-after: avoid; }
+p { margin: 6px 0; }
+ul, ol { margin: 6px 0 6px 22px; }
+li { margin: 3px 0; }
+
+.summary-box { border: 2px solid #1a1a1a; background: #fafafa; padding: 12px 14px;
+               margin: 14px 0; page-break-inside: avoid; }
+.summary-box .label { font-weight: bold; font-size: 9pt; letter-spacing: 1px; color: #555; }
+.summary-box p { margin: 4px 0; }
+
+.item { page-break-inside: avoid; margin: 10px 0; }
+
+table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 9.5pt; page-break-inside: avoid; }
+th, td { border: 1px solid #999; padding: 5px 8px; text-align: left; vertical-align: top; }
+th { background: #ececec; font-weight: bold; }
+tr { page-break-inside: avoid; }
+
+code { font-family: Consolas, "D2Coding", monospace; font-size: 9pt;
+       background: #f2f2f2; padding: 1px 4px; border-radius: 2px; }
+pre { font-family: Consolas, "D2Coding", monospace; font-size: 8.8pt; line-height: 1.5;
+      background: #f6f6f6; border: 1px solid #ccc; padding: 9px 11px; margin: 8px 0;
+      white-space: pre-wrap; word-break: break-all; page-break-inside: avoid; }
+pre code { background: none; padding: 0; }
+
+.warn { border-left: 5px solid #c0392b; background: #fdf0ee; padding: 9px 12px; margin: 10px 0; page-break-inside: avoid; }
+.note { border-left: 5px solid #2471a3; background: #eef4fa; padding: 9px 12px; margin: 10px 0; page-break-inside: avoid; }
+.ok   { border-left: 5px solid #1e8449; background: #eef8f1; padding: 9px 12px; margin: 10px 0; page-break-inside: avoid; }
+.warn strong, .note strong, .ok strong { display: inline-block; margin-bottom: 2px; }
+
+.tag { display: inline-block; font-size: 8.5pt; font-weight: bold; padding: 1px 8px;
+       border-radius: 10px; vertical-align: middle; }
+.tag-red    { background: #c0392b; color: #fff; }
+.tag-orange { background: #d68910; color: #fff; }
+.tag-green  { background: #1e8449; color: #fff; }
+.tag-gray   { background: #777; color: #fff; }
+
+.next-box { border: 2px solid #1e8449; background: #f2faf4; padding: 12px 14px;
+            margin: 16px 0; page-break-inside: avoid; }
+.next-box .label { font-weight: bold; color: #1e8449; font-size: 10pt; }
+
+.footer { border-top: 2px solid #1a1a1a; margin-top: 26px; padding-top: 8px;
+          font-size: 8.5pt; color: #666; display: flex; justify-content: space-between; }
+</style>
+</head>
+<body>
+<div class="sheet">
+
+<div class="report-header">
+  <div class="report-no">REPORT #002</div>
+  <h1>AVA 90 서버(Windows) 마이그레이션 가이드<br>
+      <span style="font-size:12pt; font-weight:normal; color:#444;">WSL1 Asterisk + WSL2 Docker Engine 구성 (Docker Desktop 불필요)</span></h1>
+  <div class="meta">
+    <span>작성일: 2026-08-24</span>
+    <span>프로젝트: AVA — AI Voice Agent for Asterisk (v7.5.x)</span>
+    <span>대상: 90 서버 (Windows, 가상화 사용 가능)</span>
+  </div>
+</div>
+
+<div class="summary-box">
+  <div class="label">결론 요약</div>
+  <p><strong>Docker Desktop 없이 배포 가능하다.</strong> AVA의 공식 지원 환경은 Docker Desktop이 아니라 <strong>Docker Engine + Compose v2</strong>이며, 90 서버에는 WSL2 배포판을 하나 추가해 그 안에 Docker Engine을 설치하는 방식(옵션 B)을 권장한다.</p>
+  <p>Asterisk가 이미 설치된 <strong>WSL1 배포판은 그대로 유지</strong>한다 — WSL1은 Windows 네트워크 스택을 공유하므로 SIP/RTP 수신에 유리하다. WSL1과 WSL2 배포판은 한 서버에서 공존 가능하다.</p>
+  <p>현재 오디오 전송이 <code>audio_transport: audiosocket</code>(TCP 8090)이므로 Asterisk(WSL1) → AVA(WSL2) 연결은 Windows의 localhost 자동 포워딩으로 해결된다. UDP 포워딩 문제는 발생하지 않는다.</p>
+</div>
+
+<h2>1. 아키텍처 개요</h2>
+<div class="item">
+<table>
+  <tr><th style="width:28%">구성 요소</th><th style="width:26%">위치</th><th>역할 / 비고</th></tr>
+  <tr><td>Asterisk</td><td>WSL1 배포판 (기존)</td><td>Windows 스택 공유 → 서버 LAN IP로 SIP/RTP 직접 수신. <strong>변경 없음</strong></td></tr>
+  <tr><td>AVA ai_engine</td><td>WSL2 배포판 (신규) 내 Docker</td><td>통화 처리 본체. AudioSocket TCP 8090 수신</td></tr>
+  <tr><td>AVA admin_ui</td><td>WSL2 배포판 내 Docker</td><td>웹 관리 화면 (포트 3003). 선택 사항</td></tr>
+  <tr><td>local_ai_server</td><td>—</td><td><span class="tag tag-gray">불필요</span> OpenAI Realtime 프로바이더 사용 구성이므로 미배포</td></tr>
+</table>
+</div>
+<div class="note"><strong>통신 경로 (경계를 넘는 두 곳)</strong><br>
+① Asterisk(WSL1) → AVA AudioSocket: <code>127.0.0.1:8090</code> — Windows가 localhost를 WSL2로 자동 포워딩<br>
+② AVA 컨테이너 → Asterisk ARI: <strong>90 서버 LAN IP</strong>(예: 192.168.x.90)의 8088 — 컨테이너 안에서 127.0.0.1은 자기 자신이므로 사용 불가</div>
+
+<h2>2. 사전 준비 — 현재 PC에서 챙길 것</h2>
+
+<div class="warn"><strong>⚠ 커밋되지 않은 로컬 수정 존재</strong><br>
+현재 체크아웃에 <code>src/engine.py</code>, <code>src/providers/openai_realtime.py</code>, <code>config/ai-agent.yaml</code>의 미커밋 수정이 있다. 90 서버에서 새로 클론하면 이 수정이 빠진다. <strong>커밋 후 푸시</strong>하거나, 최소한 <code>git diff &gt; ava-local.patch</code>로 패치를 떠서 서버에서 적용할 것.</div>
+
+<div class="item">
+<h3>이전(복사)할 파일 목록</h3>
+<table>
+  <tr><th style="width:45%">파일</th><th>내용</th></tr>
+  <tr><td><code>.env</code></td><td>API 키, ARI 접속 정보 등 시크릿</td></tr>
+  <tr><td><code>config/ai-agent.yaml</code></td><td>메인 설정 (미커밋 수정 포함)</td></tr>
+  <tr><td><code>config/ai-agent.local.yaml</code>, <code>config/users.json</code></td><td>존재하는 경우에만</td></tr>
+  <tr><td><code>data/operator/agents.db</code></td><td>에이전트/페르소나 DB — <strong>삭제 금지</strong></td></tr>
+  <tr><td><code>data/call_history.db</code></td><td>통화 이력 DB (존재 시)</td></tr>
+</table>
+</div>
+
+<h2>3. 설치 절차 (권장 경로: WSL2 + Docker Engine)</h2>
+
+<div class="item">
+<h3>Step 1 — WSL2 배포판 추가 <span class="tag tag-orange">관리자 PowerShell</span></h3>
+<p>기존 Asterisk(WSL1) 배포판은 건드리지 않는다.</p>
+<pre><code>wsl --set-default-version 2
+wsl --install -d Ubuntu-24.04     # 새 배포판만 WSL2로 설치 (재부팅 필요할 수 있음)
+wsl -l -v                          # Asterisk 배포판이 VERSION 1로 유지되는지 확인</code></pre>
+</div>
+
+<div class="item">
+<h3>Step 2 — Docker Engine 설치 <span class="tag tag-green">WSL2 Ubuntu 내부</span></h3>
+<pre><code>curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER      # 이후 셸 재접속
+docker compose version             # Compose v2 확인</code></pre>
+<p>최신 WSL은 systemd가 기본 활성화되어 docker 데몬이 자동 시작된다.</p>
+</div>
+
+<div class="item">
+<h3>Step 3 — 레포 클론 + 설정 이전 <span class="tag tag-green">WSL2 Ubuntu 내부</span></h3>
+<p>반드시 WSL 내부 파일시스템(<code>~/</code>)에 클론한다. <code>/mnt/c/...</code>는 I/O가 느려 음성 처리에 불리하다.</p>
+<pre><code>cd ~
+git clone &lt;레포 URL&gt; AVA-AI-Voice-Agent-for-Asterisk
+cd AVA-AI-Voice-Agent-for-Asterisk
+# (미커밋 수정을 패치로 가져온 경우) git apply /mnt/c/.../ava-local.patch
+# 2절의 파일들을 동일 경로에 복사 (.env, config/*, data/*)</code></pre>
+</div>
+
+<div class="item">
+<h3>Step 4 — 접속 정보 수정</h3>
+<table>
+  <tr><th style="width:38%">항목</th><th>설정값</th></tr>
+  <tr><td><code>.env</code> → <code>ASTERISK_HOST</code></td><td>90 서버 <strong>LAN IP</strong> (예: 192.168.x.90). 컨테이너에서 ARI 접근용</td></tr>
+  <tr><td>Asterisk <code>http.conf</code></td><td><code>bindaddr=0.0.0.0</code> 확인 — 127.0.0.1 단독 바인드면 컨테이너에서 접근 불가</td></tr>
+  <tr><td>다이얼플랜 AudioSocket 대상</td><td><code>127.0.0.1:8090</code> (localhost 자동 포워딩 이용)</td></tr>
+</table>
+</div>
+
+<div class="item">
+<h3>Step 5 — 기동 <span class="tag tag-green">WSL2 Ubuntu 내부</span></h3>
+<p>WSL2 내부는 리눅스이므로 Windows용 오버라이드 파일 없이 기본 compose로 실행한다.</p>
+<pre><code>docker compose up -d --build ai_engine admin_ui
+docker compose logs -f ai_engine   # 기동 로그 확인</code></pre>
+</div>
+
+<div class="item">
+<h3>Step 6 — 부팅 자동화 <span class="tag tag-orange">Windows 작업 스케줄러</span></h3>
+<p>WSL2 VM은 세션이 없으면 종료되므로, 부팅 시 작업으로 다음을 <strong>숨김 실행</strong> 등록한다:</p>
+<pre><code>wsl.exe -d Ubuntu-24.04 --exec sleep infinity</code></pre>
+<p>WSL2가 상시 유지되면 systemd가 docker를 올리고, compose의 <code>restart: unless-stopped</code> 정책이 컨테이너를 자동 복구한다.</p>
+</div>
+
+<h2>4. 검증 체크리스트</h2>
+<div class="item">
+<table>
+  <tr><th style="width:6%">✓</th><th style="width:44%">확인 항목</th><th>방법</th></tr>
+  <tr><td>☐</td><td>Docker 정상 동작</td><td>WSL2에서 <code>docker ps</code> — ai_engine, admin_ui가 Up 상태</td></tr>
+  <tr><td>☐</td><td>ARI 연결 성공</td><td><code>docker compose logs ai_engine</code>에서 ARI connected 로그 확인</td></tr>
+  <tr><td>☐</td><td>AudioSocket 수신 대기</td><td>Windows에서 <code>Test-NetConnection 127.0.0.1 -Port 8090</code> 성공</td></tr>
+  <tr><td>☐</td><td>Admin UI 접속</td><td>브라우저에서 <code>http://127.0.0.1:3003</code></td></tr>
+  <tr><td>☐</td><td>실제 통화 테스트</td><td>내선에서 AI 에이전트 호출 → 인사말 재생 + 양방향 대화 확인</td></tr>
+  <tr><td>☐</td><td>재부팅 생존 테스트</td><td>서버 재부팅 후 위 항목 전체 재확인 (자동화 검증)</td></tr>
+</table>
+</div>
+
+<h2>5. 대안 경로 (참고): Docker 없이 네이티브 실행</h2>
+<div class="item">
+<p>빠른 검증이 우선이면 Asterisk와 <strong>같은 WSL1 배포판</strong> 안에서 Python으로 직접 실행할 수도 있다. ai_engine의 실체는 <code>python main.py</code> 하나다.</p>
+<pre><code>python3 -m venv venv &amp;&amp; source venv/bin/activate
+pip install -r requirements.txt
+python main.py     # 모든 통신이 127.0.0.1 — 포워딩 불필요</code></pre>
+<p>장점: 이동 부품 최소, 네트워크 설정 전무. 단점: 공식 지원 경로가 아니어서 업그레이드(<code>agent update</code>)·자동 재시작·Admin UI Docker 관리 기능을 수동으로 관리해야 한다(WSL1은 systemd 없음 → while 루프 스크립트 + 작업 스케줄러). <strong>운영 전환 시에는 옵션 B(3절) 권장.</strong> 설정 파일은 양쪽 경로에서 동일하게 사용된다.</p>
+</div>
+
+<div class="next-box">
+  <div class="label">■ 권장 조치 / 다음 단계</div>
+  <ol>
+    <li>현재 PC의 미커밋 수정 3개 파일을 커밋·푸시 (또는 패치 생성)</li>
+    <li>90 서버에 WSL2 배포판 설치 → Docker Engine 설치 (3절 Step 1–2)</li>
+    <li>설정·DB 파일 이전 후 <code>ASTERISK_HOST</code>만 LAN IP로 변경 (Step 3–4)</li>
+    <li>기동 → 4절 체크리스트로 검증 → 재부팅 생존 테스트까지 완료</li>
+    <li>안정 확인 후 현재 PC의 인스턴스 중지 (이중 응답 방지)</li>
+  </ol>
+</div>
+
+<div class="footer">
+  <span>AVA — AI Voice Agent for Asterisk</span>
+  <span>Report #002 · 2026-08-24</span>
+</div>
+
+</div>
+</body>
+</html>

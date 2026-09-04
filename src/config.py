@@ -737,6 +737,12 @@ class OpenAIRealtimeProviderConfig(BaseModel):
     egress_pacer_warmup_ms: int = Field(default=320)
     # Optional explicit greeting to speak immediately on connect
     greeting: Optional[str] = None
+    # Optional pre-recorded greeting (Asterisk sound name, e.g. custom/ava-greeting).
+    # When set, the engine plays this file to the caller as soon as the provider
+    # session starts (hiding connect/ACK latency) and the AI does not synthesize
+    # its own greeting. `greeting` is still passed to the model as context so it
+    # knows what the caller already heard.
+    greeting_file: Optional[str] = None
     # Optional server-side turn detection configuration
     # If provided, will be sent in session.update
     class TurnDetectionConfig(BaseModel):

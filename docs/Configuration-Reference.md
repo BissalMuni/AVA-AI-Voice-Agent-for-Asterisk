@@ -490,6 +490,7 @@ For ElevenLabs full-agent deployments, also follow the provider-side client-even
 - providers.openai_realtime.model, voice, base_url: Model and voice.
 - providers.openai_realtime.instructions: Persona override. Leave empty to inherit `llm.prompt`.
 - providers.openai_realtime.greeting: Explicit greeting. Leave empty to inherit `llm.initial_greeting`.
+- providers.openai_realtime.greeting_file: Optional pre-recorded greeting as an Asterisk sound name (for example `custom/ava-greeting`, i.e. `/var/lib/asterisk/sounds/custom/ava-greeting.wav`, 8 kHz mono). When set, the engine plays the file to the caller the moment the provider session starts, hiding connect/ACK/synthesis latency, and the model is told not to greet again (the `greeting` text is passed as context only). Caller audio is echo-gated while the file plays; if the file cannot be played the provider falls back to speaking `greeting`. Remote URLs and `file:` URIs are rejected.
 - providers.openai_realtime.response_modalities: list of modalities, typically `[\"audio\"]` or `[\"audio\", \"text\"]`.
 - providers.openai_realtime.provider_input_encoding/provider_input_sample_rate_hz: Format sent to OpenAI (typically PCM16); prefer matching this to the engine’s internal PCM rate to avoid extra resampling.
 - providers.openai_realtime.input_encoding/input_sample_rate_hz: Inbound format; use `ulaw` at 8 kHz when AudioSocket() is invoked with `,ulaw` (engine converts to PCM before sending to OpenAI).

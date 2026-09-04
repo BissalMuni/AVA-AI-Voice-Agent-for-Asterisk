@@ -9286,6 +9286,11 @@ class Engine:
             except Exception:
                 logger.debug("Connection audio stop failed during cleanup", call_id=call_id, exc_info=True)
 
+            try:
+                await self._stop_greeting_file(session, reason="call-cleanup")
+            except Exception:
+                logger.debug("Greeting file stop failed during cleanup", call_id=call_id, exc_info=True)
+
             # Stop background music if playing (AAVA-89)
             try:
                 await self._stop_background_music(session)
@@ -9303,6 +9308,7 @@ class Engine:
                 if drain_task and not drain_task.done():
                     drain_task.cancel()
                 self._agent_output_active_calls.discard(call_id)
+                getattr(self, "_echo_gate_last_active_ts", {}).pop(call_id, None)
                 fallback = self._terminal_fallback_tasks.pop(call_id, None)
                 if fallback and not fallback.done():
                     fallback.cancel()
@@ -10339,14 +10345,59 @@ class Engine:
                 # Google Live needs silence substitution during ordinary output.
                 # Other native full-agent providers keep caller audio flowing so
                 # their provider-owned VAD/barge-in remains functional.
-                needs_gating = self._get_provider_kind(provider_name) == "google_live"
-                
-                if needs_gating and not session.audio_capture_enabled:
-                    # Send silence instead of blocking so Google Live's continuous
+                provider_kind = self._get_provider_kind(provider_name)
+                needs_gating = provider_kind == "google_live"
+                if not needs_gating and provider_kind == "openai_realtime":
+                    # With barge-in disabled the caller cannot interrupt anyway, so
+                    # half-duplex gating is safe: silence-substitute during playback
+                    # to keep our own telephony echo out of OpenAI's server VAD
+                    # (echo was firing speech_started and flushing/cancelling the
+                    # response mid-sentence).
+                    try:
+                        _barge_cfg = getattr(self.config, "barge_in", None)
+                        needs_gating = _barge_cfg is not None and not bool(getattr(_barge_cfg, "enabled", True))
+                    except Exception:
+                        needs_gating = False
+
+                # Gate on the real caller-facing output window: gating tokens can
+                # clear seconds before the jitter buffer finishes draining, while
+                # _agent_output_active_calls is only discarded after transport
+                # drain completes (see _finish_provider_output_after_drain).
+                _output_active = caller_channel_id in (getattr(self, "_agent_output_active_calls", set()) or set())
+                # The recorded greeting is caller-facing output too (played by Asterisk,
+                # not through the provider path), so gate its telephony echo as well.
+                _greeting_file_active = bool(getattr(session, "greeting_file_playback_id", None))
+                gate_now = needs_gating and (
+                    _output_active or _greeting_file_active or not session.audio_capture_enabled
+                )
+                if needs_gating:
+                    _tail_map = getattr(self, "_echo_gate_last_active_ts", None)
+                    if _tail_map is None:
+                        _tail_map = {}
+                        self._echo_gate_last_active_ts = _tail_map
+                    _now_ts = time.time()
+                    if gate_now:
+                        _tail_map[caller_channel_id] = _now_ts
+                    else:
+                        # Tail guard: the caller-side echo of our audio arrives one
+                        # telephony round-trip after playback drains; keep
+                        # substituting briefly (at least 600 ms).
+                        try:
+                            _post_ms = int(getattr(getattr(self.config, "barge_in", None), "post_tts_end_protection_ms", 0) or 0)
+                        except Exception:
+                            _post_ms = 0
+                        _post_ms = max(_post_ms, 600)
+                        _last_ts = float(_tail_map.get(caller_channel_id, 0.0) or 0.0)
+                        if _last_ts and (_now_ts - _last_ts) * 1000 < _post_ms:
+                            gate_now = True
+
+                if gate_now:
+                    # Send silence instead of blocking so the provider's continuous
                     # input timing and VAD state remain stable.
                     logger.debug(
-                        "🔇 GATING ACTIVE - Sending silence frame for Google Live (TTS playing)",
+                        "🔇 GATING ACTIVE - Sending silence frame during agent output",
                         call_id=caller_channel_id,
+                        provider=provider_name,
                         audio_capture_enabled=session.audio_capture_enabled,
                     )
                     pcm_bytes = b'\x00' * len(pcm_bytes)
@@ -10448,8 +10499,8 @@ class Engine:
                         frame_num=frame_num,
                         frame_bytes=len(audio_bytes),
                         pcm_bytes=len(pcm_bytes),
-                        gating_active=needs_gating and not session.audio_capture_enabled,
-                        is_silence=needs_gating and not session.audio_capture_enabled,
+                        gating_active=gate_now,
+                        is_silence=gate_now,
                     )
                 try:
                     self._update_audio_diagnostics(session, "provider_in", pcm_bytes, "slin16", pcm_rate)
@@ -13086,15 +13137,18 @@ class Engine:
                 seq = self._provider_chunk_seq.get(call_id, 0) + 1
                 self._provider_chunk_seq[call_id] = seq
                 try:
-                    logger.info(
-                        "PROVIDER CHUNK",
-                        call_id=call_id,
-                        seq=seq,
-                        size_bytes=len(chunk),
-                        encoding=enc,
-                        sample_rate_hz=rate,
-                        approx_duration_ms=duration_ms,
-                    )
+                    # Rate-limited: logging every 20 ms chunk at INFO measurably
+                    # loads the event loop and contributes to playback pacing drift.
+                    if seq <= 3 or seq % 50 == 0:
+                        logger.info(
+                            "PROVIDER CHUNK",
+                            call_id=call_id,
+                            seq=seq,
+                            size_bytes=len(chunk),
+                            encoding=enc,
+                            sample_rate_hz=rate,
+                            approx_duration_ms=duration_ms,
+                        )
                 except Exception:
                     pass
                 try:
@@ -17386,6 +17440,149 @@ class Engine:
                 exc_info=True,
             )
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Recorded greeting (provider `greeting_file`)
+    # ─────────────────────────────────────────────────────────────────────────
+    # A pre-recorded greeting is played to the caller the moment the provider
+    # session starts, so the provider's connect/ACK/first-synthesis latency is
+    # hidden behind it. The provider is then told not to greet on its own.
+
+    @staticmethod
+    def _provider_greeting_file(cfg: Any) -> Optional[str]:
+        """Return the configured recorded-greeting media for a provider config, if any."""
+        if cfg is None:
+            return None
+        try:
+            value = cfg.get("greeting_file") if isinstance(cfg, dict) else getattr(cfg, "greeting_file", None)
+        except Exception:
+            return None
+        value = str(value or "").strip()
+        return value or None
+
+    async def _start_greeting_file(self, session: CallSession, media_uri: Any) -> bool:
+        """Play the recorded greeting to the caller. Returns True when playback started."""
+        if getattr(session, "greeting_file_playback_id", None):
+            return True
+        channel_id = getattr(session, "caller_channel_id", None)
+        normalized_uri = Engine._normalize_connection_audio_uri(media_uri)
+        if not channel_id or not normalized_uri:
+            return False
+
+        playback_id = f"greeting-file-{uuid.uuid4().hex}"
+        try:
+            started = await self.ari_client.play_media_on_channel_with_id(
+                channel_id, normalized_uri, playback_id
+            )
+        except Exception:
+            logger.warning(
+                "Greeting file failed to start; provider will greet instead",
+                call_id=session.call_id,
+                media_uri=normalized_uri,
+                exc_info=True,
+            )
+            return False
+        if not started:
+            logger.warning(
+                "Greeting file failed to start; provider will greet instead",
+                call_id=session.call_id,
+                channel_id=channel_id,
+                media_uri=normalized_uri,
+            )
+            return False
+
+        session.greeting_file_playback_id = playback_id
+        session.greeting_file_media_uri = normalized_uri
+        session.greeting_file_started_ts = time.time()
+        registry = getattr(self, "_greeting_file_playbacks", None)
+        if registry is None:
+            registry = {}
+            self._greeting_file_playbacks = registry
+        registry[playback_id] = session.call_id
+        await self._save_session(session)
+        # Setup ringback must not overlap the recorded greeting.
+        await self._stop_connection_audio(session, reason="greeting-file")
+        logger.info(
+            "Greeting file started",
+            call_id=session.call_id,
+            channel_id=channel_id,
+            media_uri=normalized_uri,
+            playback_id=playback_id,
+        )
+        return True
+
+    @staticmethod
+    def _suppress_provider_greeting(provider: Any) -> str:
+        """Clear the provider's text greeting (already played from file) and flag the provider.
+
+        Returns the greeting text that was cleared so callers can log it.
+        """
+        cfg = getattr(provider, "config", None)
+        greeting_text = ""
+        try:
+            if isinstance(cfg, dict):
+                greeting_text = str(cfg.get("greeting") or "")
+                cfg["greeting"] = ""
+            elif cfg is not None and hasattr(cfg, "greeting"):
+                greeting_text = str(getattr(cfg, "greeting", "") or "")
+                setattr(cfg, "greeting", "")
+        except Exception:
+            logger.debug("Failed clearing provider greeting for greeting file", exc_info=True)
+        try:
+            provider._greeting_file_active = True
+            provider._greeting_file_text = greeting_text.strip()
+        except Exception:
+            pass
+        return greeting_text.strip()
+
+    async def _stop_greeting_file(
+        self, session: CallSession, *, reason: str, already_finished: bool = False
+    ) -> None:
+        """Forget (and unless already finished, stop) the recorded greeting playback."""
+        playback_id = getattr(session, "greeting_file_playback_id", None)
+        if not playback_id:
+            return
+        if not already_finished:
+            try:
+                await self.ari_client.stop_playback(playback_id)
+            except Exception:
+                logger.debug(
+                    "Greeting file stop failed", call_id=session.call_id, playback_id=playback_id, exc_info=True
+                )
+        registry = getattr(self, "_greeting_file_playbacks", None)
+        if registry:
+            registry.pop(playback_id, None)
+        started_ts = float(getattr(session, "greeting_file_started_ts", 0.0) or 0.0)
+        media_uri = getattr(session, "greeting_file_media_uri", None)
+        session.greeting_file_playback_id = None
+        session.greeting_file_media_uri = None
+        session.greeting_file_started_ts = 0.0
+        try:
+            await self._save_session(session)
+        except Exception:
+            logger.debug("Failed to persist greeting file stop", call_id=session.call_id, exc_info=True)
+        elapsed_ms = int(max(0.0, time.time() - started_ts) * 1000) if started_ts else None
+        logger.info(
+            "Greeting file ended",
+            call_id=session.call_id,
+            media_uri=media_uri,
+            playback_id=playback_id,
+            reason=reason,
+            elapsed_ms=elapsed_ms,
+        )
+
+    async def _on_greeting_file_playback_finished(self, playback_id: str) -> bool:
+        """Handle ARI PlaybackFinished for a recorded greeting. Returns True if it was one."""
+        registry = getattr(self, "_greeting_file_playbacks", None) or {}
+        call_id = registry.get(playback_id)
+        if not call_id:
+            return False
+        session = await self.session_store.get_by_call_id(call_id)
+        if session:
+            await self._stop_greeting_file(session, reason="playback-finished", already_finished=True)
+        else:
+            registry.pop(playback_id, None)
+        return True
+
     async def _stop_connection_audio(self, session: CallSession, *, reason: str) -> None:
         """Stop connection audio once caller-facing AI audio can take over."""
         playback_id = getattr(session, "connection_audio_playback_id", None)
@@ -19090,6 +19287,23 @@ class Engine:
             provider = factory()
             # Apply per-call context/prompt/transport overrides before start_session reads config.
             self._apply_provider_overrides(provider, session)
+            # Recorded greeting: start playing the file to the caller right now so
+            # the provider's connect/ACK/synthesis latency is hidden behind it. The
+            # provider then starts listening without greeting on its own. If the
+            # file cannot be played, fall back to the provider's text greeting.
+            try:
+                greeting_file = Engine._provider_greeting_file(getattr(provider, "config", None))
+                if greeting_file and await self._start_greeting_file(session, greeting_file):
+                    cleared = Engine._suppress_provider_greeting(provider)
+                    logger.info(
+                        "Provider greeting replaced by greeting file",
+                        call_id=call_id,
+                        provider=provider_name,
+                        greeting_file=greeting_file,
+                        greeting_preview=(cleared[:50] + "...") if len(cleared) > 50 else cleared,
+                    )
+            except Exception:
+                logger.debug("Greeting file setup failed", call_id=call_id, exc_info=True)
             # Inject shared runtime helpers (latency tracking, tool context helpers).
             try:
                 if hasattr(provider, "set_session_store"):
@@ -19607,6 +19821,10 @@ class Engine:
                     waiter.set_result(True)
                 except Exception:
                     pass
+
+            # Recorded greeting playbacks are engine-owned; clear their state here.
+            if await self._on_greeting_file_playback_finished(playback_id):
+                return
 
             # PlaybackManager tracks/gates only engine-managed TTS playbacks.
             # Attended transfer uses ad-hoc deterministic IDs; avoid warning spam for unknown IDs.

@@ -526,7 +526,15 @@ class OpenAIRealtimeProvider(AIProviderInterface):
         
         # NOW send greeting after session is configured
         try:
-            if (self.config.greeting or "").strip():
+            if getattr(self, "_greeting_file_active", False):
+                # The engine is already playing a recorded greeting to the caller.
+                # Do not synthesize a greeting and do not request an unprompted
+                # first response; wait for the caller to speak.
+                logger.info(
+                    "Recorded greeting in progress - skipping AI greeting and initial response",
+                    call_id=call_id,
+                )
+            elif (self.config.greeting or "").strip():
                 logger.info("Sending explicit greeting (after session ACK)", call_id=call_id)
                 await self._send_explicit_greeting()
             else:
@@ -1295,6 +1303,15 @@ class OpenAIRealtimeProvider(AIProviderInterface):
             session["instructions"] = audio_forcing_prefix + self.config.instructions
         else:
             session["instructions"] = audio_forcing_prefix
+        if getattr(self, "_greeting_file_active", False):
+            # A recorded greeting was played by the engine; tell the model so it
+            # does not greet a second time.
+            played = str(getattr(self, "_greeting_file_text", "") or "").strip()
+            session["instructions"] += (
+                "\n\nNOTE: A recorded greeting has already been played to the caller at the start of this call"
+                + (f': "{played}"' if played else "")
+                + ". Do not greet or introduce yourself again; respond directly to what the caller says."
+            )
 
         # Add tool calling configuration (context allowlist only)
         try:
@@ -2564,6 +2581,28 @@ class OpenAIRealtimeProvider(AIProviderInterface):
     async def _emit_audio_done(self):
         if not self.on_event or not self._call_id:
             return
+        # OpenAI generates audio faster than real-time, so response.done arrives
+        # while _outbuf still holds seconds of unplayed audio. Cancelling the
+        # pacer at that point discards the tail of the response (the caller
+        # hears a mid-sentence cut). Wait for the pacer to finish emitting the
+        # buffered audio before declaring the segment done. Cancel/barge-in
+        # paths clear _outbuf first, so this wait exits immediately there.
+        try:
+            chunk_bytes, _ = self._pacer_params()
+            drain_deadline = time.monotonic() + 60.0
+            while (
+                self._pacer_running
+                and self.websocket
+                and self.websocket.state.name == "OPEN"
+                and time.monotonic() < drain_deadline
+            ):
+                async with self._pacer_lock:
+                    remaining = len(self._outbuf)
+                if remaining < max(1, chunk_bytes):
+                    break
+                await asyncio.sleep(0.02)
+        except Exception:
+            logger.debug("Egress pacer drain wait failed", call_id=self._call_id, exc_info=True)
         try:
             if self._in_audio_burst:
                 is_greeting = bool(
@@ -3107,6 +3146,7 @@ class OpenAIRealtimeProvider(AIProviderInterface):
             logger.debug("Pacer warm-up error", call_id=call_id, exc_info=True)
 
         # Emit loop at 20 ms cadence
+        next_deadline = time.monotonic()
         try:
             while self.websocket and self.websocket.state.name == "OPEN" and self._pacer_running:
                 chunk = b""
@@ -3155,7 +3195,19 @@ class OpenAIRealtimeProvider(AIProviderInterface):
                     )
                 except Exception:
                     logger.error("Failed to emit paced AgentAudio", call_id=call_id, exc_info=True)
-                await asyncio.sleep(0.02)
+                # Absolute-deadline pacing: sleep(0.02) alone drifts by the per-
+                # iteration processing cost (~15% observed), starving downstream
+                # playback and causing audible mid-sentence gaps. Schedule each
+                # chunk against a monotonic deadline and skip the sleep entirely
+                # when behind so the buffer refills at catch-up speed.
+                next_deadline += 0.02
+                now_mono = time.monotonic()
+                delay = next_deadline - now_mono
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                elif delay < -0.5:
+                    # Long stall (event-loop hiccup): resync instead of flooding.
+                    next_deadline = now_mono
         except asyncio.CancelledError:
             return
         except Exception:

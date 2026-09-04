@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>Report #004 — 사람 연결 모드 + 운영자 콘솔 최종 구현 계획</title>
+<style>
+@page { size: A4; margin: 18mm 16mm; }
+* { box-sizing: border-box; }
+body { font-family: "Malgun Gothic", "맑은 고딕", sans-serif;
+       font-size: 10.5pt; line-height: 1.65; color: #1a1a1a; background: #fff; margin: 0; }
+.sheet { max-width: 180mm; margin: 0 auto; padding: 24px 16px; }
+@media print { .sheet { max-width: none; padding: 0; } }
+h1 { font-size: 17pt; margin: 4px 0 2px; }
+h2 { font-size: 13pt; margin: 26px 0 8px; padding-bottom: 4px;
+     border-bottom: 2px solid #2c5f8a; color: #2c5f8a; page-break-after: avoid; }
+h3 { font-size: 11pt; margin: 16px 0 6px; page-break-after: avoid; }
+.report-no { font-size: 9.5pt; letter-spacing: 2px; color: #2c5f8a; font-weight: bold; }
+.meta { font-size: 9pt; color: #555; margin: 2px 0 0; }
+.header { border-bottom: 3px solid #2c5f8a; padding-bottom: 10px; margin-bottom: 16px; }
+.summary-box { background: #eef4fa; border: 1px solid #b9cfe4; border-left: 5px solid #2c5f8a;
+               padding: 10px 14px; margin: 14px 0; page-break-inside: avoid; }
+.summary-box b { color: #2c5f8a; }
+.decision-box { background: #f3eefa; border: 1px solid #cdbde4; border-left: 5px solid #6a4c93;
+                padding: 10px 14px; margin: 14px 0; page-break-inside: avoid; }
+.item { page-break-inside: avoid; margin: 10px 0; }
+table { border-collapse: collapse; width: 100%; font-size: 9.5pt; margin: 8px 0; }
+th, td { border: 1px solid #999; padding: 5px 8px; text-align: left; vertical-align: top; }
+th { background: #e8eef4; }
+tr { page-break-inside: avoid; }
+code { font-family: Consolas, "D2Coding", monospace; font-size: 9pt;
+       background: #f2f2f2; padding: 1px 4px; border-radius: 2px; }
+.flow { font-family: Consolas, monospace; font-size: 9pt; background: #f7f7f7;
+        border: 1px solid #ddd; padding: 10px 12px; white-space: pre; overflow-x: auto;
+        page-break-inside: avoid; }
+.phase { border: 1px solid #ccc; border-radius: 4px; padding: 8px 12px; margin: 8px 0;
+         page-break-inside: avoid; }
+.phase h3 { margin-top: 0; }
+.tag { display: inline-block; font-size: 8.5pt; font-weight: bold; padding: 1px 8px;
+       border-radius: 10px; margin-right: 6px; }
+.tag-green { background: #d8efd8; color: #1e6b1e; }
+.tag-orange { background: #fde8cf; color: #a05a00; }
+.tag-red { background: #fadcdc; color: #a11a1a; }
+.tag-blue { background: #dbe9f7; color: #1d4f7c; }
+.warn-box { background: #fdf3e3; border: 1px solid #e8c98a; border-left: 5px solid #d99a2b;
+            padding: 10px 14px; margin: 14px 0; page-break-inside: avoid; }
+.next-box { background: #e9f5e9; border: 1px solid #a8d1a8; border-left: 5px solid #3a8a3a;
+            padding: 10px 14px; margin: 14px 0; page-break-inside: avoid; }
+.footer { margin-top: 30px; padding-top: 8px; border-top: 1px solid #999;
+          font-size: 8.5pt; color: #666; display: flex; justify-content: space-between; }
+ul, ol { margin: 4px 0 8px; padding-left: 22px; }
+li { margin: 2px 0; }
+</style>
+</head>
+<body>
+<div class="sheet">
+
+<div class="header">
+  <div class="report-no">REPORT #004</div>
+  <h1>사람 연결 모드 + 운영자 콘솔 — 최종 구현 계획</h1>
+  <p class="meta">날짜: 2026-09-01 · 프로젝트: AVA (AI Voice Agent for Asterisk) · Report #003을 대체(사람 중심 통화로 요구사항 확정)</p>
+</div>
+
+<div class="summary-box">
+  <b>결론:</b> AI에게 통화를 맡기지 않는다. <b>착신 즉시 녹음 그리팅을 재생하고, 사람(운영자) 내선으로 걸어
+  발신자와 브리지</b>한 뒤, 사람↔발신자 통화 중에 운영자 콘솔(웹 UI)에서 <b>텍스트 TTS 송출·프리셋 음성 클릭 재생</b>으로
+  음성을 개입시킨다(양쪽 모두 들림). 전부 <b>AVA 쪽(엔진 + Admin UI)</b> 작업이며 Asterisk에는 새로 올릴 것이 없다.
+  필요한 부품(그리팅 파일 재생, 내선 originate, 사람+발신자 브리지 유지, 브리지 재생, DTMF 이벤트 수신)은
+  <b>전부 코드에 이미 존재</b>하고, 새로 만드는 것은 "사람 우선 진입 모드"와 "운영자 콘솔" 두 가지다.
+</div>
+
+<div class="decision-box">
+  <b>확정된 요구사항</b>
+  <ol>
+    <li>개입 음성은 <b>양쪽(운영자·발신자) 모두 들린다</b> → 브리지 재생(<code>bridges/{id}/play</code>) 사용</li>
+    <li><b>처음부터 사람이 받는다</b> — AI는 통화에 참여하지 않음. 최초 그리팅도 <b>녹음 목소리</b>로 재생</li>
+    <li>발신자 키패드(DTMF) 입력을 수신해 콘솔에 표시</li>
+  </ol>
+</div>
+
+<h2>1. 통화 흐름 (사람 연결 모드)</h2>
+<div class="flow">발신자 착신
+  → AVA Stasis 진입, 응답(answer)
+  → 믹싱 브리지 생성 (mixing,dtmf_events — 기존 로직)
+  → ① 녹음 그리팅 재생 (greeting_file 재사용, 브리지 재생)
+  → ② 그리팅과 동시에 운영자 내선으로 originate (기존 originate_channel)
+  → 운영자 응답 시 브리지에 추가 → 사람 ↔ 발신자 통화 시작
+       (AVA는 브리지를 계속 쥐고 있음 — AI 프로바이더는 아예 시작하지 않음)
+  → 통화 중:
+       · 콘솔 텍스트박스 → TTS 합성 → 브리지 재생 (양쪽 들림)
+       · 콘솔 프리셋 버튼 → 등록 음성 즉시 브리지 재생
+       · 발신자 DTMF → ChannelDtmfReceived → 콘솔 실시간 표시
+  → 어느 한쪽 종료 시 정리 (기존 세션 정리 로직)</div>
+
+<h2>2. 이미 있는 부품 (검증 완료)</h2>
+<div class="item">
+<table>
+<tr><th style="width:34%">부품</th><th>위치</th><th>상태</th></tr>
+<tr><td>착신 응답 + 믹싱 브리지 생성</td><td><code>src/engine.py:5873</code> (mixing,dtmf_events)</td><td>있음</td></tr>
+<tr><td>녹음 그리팅(greeting_file) 재생</td><td><code>src/config.py:745</code> + 인사말 파일 기능(08-28 구현·테스트 완료)</td><td>있음</td></tr>
+<tr><td>내선으로 전화 걸기(originate)</td><td><code>src/ari_client.py:403</code> <code>originate_channel</code>, <code>attended_transfer.py:437</code></td><td>있음</td></tr>
+<tr><td>사람 다리를 브리지에 추가·유지<br>(AI 제거 + 세션 유지)</td><td><code>src/engine.py:6881</code> <code>_finalize_predial_transfer_bridge</code></td><td>있음 (전환 기능의 결과물 — 조립 참고용)</td></tr>
+<tr><td>브리지 재생(양쪽 들림)</td><td><code>src/ari_client.py:1205</code> <code>play_audio_via_bridge</code>, <code>:1241</code> 결정적 재생 ID 버전</td><td>있음</td></tr>
+<tr><td>재생 수명 관리</td><td><code>src/core/playback_manager.py</code></td><td>있음</td></tr>
+<tr><td>DTMF 이벤트 수신</td><td><code>src/engine.py:782</code> 구독, <code>:8689</code> 핸들러(발신자 digit 처리는 확장 필요)</td><td>부분</td></tr>
+<tr><td>TTS 합성(텍스트→wav)</td><td>greeting_file의 OpenAI TTS 경로 → 공용 유틸로 추출</td><td>부분</td></tr>
+<tr><td>웹 UI + 실시간 push</td><td><code>admin_ui</code> (FastAPI+React), <code>live_status.py</code> SSE StatusHub</td><td>있음 (콘솔 페이지는 신규)</td></tr>
+</table>
+</div>
+
+<h2>3. 새로 만드는 것</h2>
+
+<h3>3-1. 사람 우선 진입 모드 (엔진)</h3>
+<div class="item">
+<ul>
+  <li>설정: <code>config/ai-agent.yaml</code>의 에이전트(또는 DID별)에 <code>mode: operator_bridge</code> +
+      <code>operator.extension</code>(운영자 내선 dial string), <code>operator.ring_timeout</code>, <code>operator.no_answer_action</code> 추가.</li>
+  <li>엔진 착신 분기: 이 모드면 AI 프로바이더/파이프라인을 시작하지 않고 위 1장의 흐름 실행.
+      기존 <code>_finalize_predial_transfer_bridge</code>의 브리지 추가·세션 유지 패턴을 재사용하되,
+      "AI 제거" 단계가 필요 없는 단순 버전.</li>
+  <li>운영자 응답 대기 동안 발신자에게는 그리팅 → (미응답 지속 시) 대기음(MOH) 또는 안내 프리셋 반복.</li>
+  <li>미응답 폴백(<code>no_answer_action</code>): 안내 후 종료 / 보이스메일 / (옵션) AI 모드로 전환 중 택1 — 기본값은 "안내 후 종료" 권장.</li>
+</ul>
+</div>
+
+<h3>3-2. 운영자 개입 API (엔진)</h3>
+<div class="item">
+<table>
+<tr><th style="width:30%">엔드포인트</th><th>동작</th></tr>
+<tr><td><code>GET /operator/calls</code></td><td>활성 콜 목록(call_id, 발신번호, 상태, 경과시간, DTMF 버퍼)</td></tr>
+<tr><td><code>POST /operator/calls/{id}/say</code></td><td><code>{text, voice}</code> → TTS 합성(wav) → <b>브리지 재생</b> (양쪽 들림)</td></tr>
+<tr><td><code>POST /operator/calls/{id}/play</code></td><td><code>{preset_id}</code> → 프리셋 파일 즉시 브리지 재생 (합성 없음 → 지연 최소)</td></tr>
+<tr><td><code>POST /operator/calls/{id}/stop</code></td><td>진행 중 개입 재생 중단 (재생 ID로 DELETE)</td></tr>
+<tr><td><code>GET /operator/presets</code></td><td>프리셋 목록(id, 라벨, 길이, 전사 텍스트)</td></tr>
+</table>
+<ul>
+  <li>재생은 항상 <code>play_media_on_bridge_with_id</code>(결정적 재생 ID)로 → 상태 추적·중단 가능.</li>
+  <li>동시 개입 요청은 큐잉(직전 재생 종료 후 순차 재생) — 겹침 방지.</li>
+  <li>보안: Admin UI backend 뒤에서만 접근(기존 내부 인증 준용), 엔진 포트 외부 비노출.</li>
+</ul>
+</div>
+
+<h3>3-3. DTMF 수신 확장 (엔진)</h3>
+<div class="item">
+<ul>
+  <li><code>src/engine.py:8689</code> <code>_handle_dtmf_received</code>: 어텐디드 전환 채널이 아닌 발신자 채널 digit →
+      세션 digit 버퍼 누적 + 콜 이력 기록 + StatusHub push.</li>
+  <li>브리지가 <code>dtmf_events</code>로 생성되므로 사람 연결 모드에서도 이벤트는 계속 도착.</li>
+  <li>Asterisk 확인 유일 항목: pjsip 엔드포인트 <code>dtmf_mode=rfc4733</code>(또는 auto).</li>
+</ul>
+</div>
+
+<h3>3-4. 프리셋 음성 관리</h3>
+<div class="item">
+<ul>
+  <li>저장: <code>assets/operator_presets/&lt;lang&gt;/</code> + 메타데이터(id, 라벨, 파일, 전사, 순서).</li>
+  <li>등록: (a) 텍스트 입력 → TTS 생성·저장, (b) 음성 파일 업로드(예: 직접 녹음).</li>
+  <li>최초 그리팅도 같은 체계의 프리셋으로 관리 가능(greeting_file과 일원화 검토).</li>
+</ul>
+</div>
+
+<h3>3-5. 운영자 콘솔 페이지 (Admin UI)</h3>
+<div class="item">
+<ul>
+  <li><code>admin_ui/backend/api/operator.py</code>: 엔진 API 프록시 + 프리셋 CRUD.</li>
+  <li><code>admin_ui/frontend/src/pages/OperatorConsolePage.tsx</code>:
+    <ul>
+      <li>좌: 활성 콜 목록(선택) — 발신번호·경과시간·수신 DTMF 실시간 표시</li>
+      <li>중: 텍스트박스(Enter=송출) + 송출 이력 + 합성/재생 상태 표시</li>
+      <li>우: 프리셋 버튼 그리드(클릭 즉시 재생) + 재생 중지 버튼</li>
+    </ul>
+  </li>
+  <li>실시간 갱신: StatusHub(SSE)에 <code>operator</code> 컴포넌트 추가 — 콜 시작/종료, 재생 시작/종료, DTMF push.</li>
+</ul>
+</div>
+
+<h2>4. 단계별 로드맵</h2>
+
+<div class="phase">
+<h3><span class="tag tag-green">Phase 1</span>사람 연결 모드 (예상 1–2일)</h3>
+<ul>
+  <li>설정 스키마 + 착신 분기 + 그리팅 재생 + 운영자 originate + 브리지</li>
+  <li>미응답 폴백(안내 후 종료), 통화 종료 정리</li>
+  <li>검증: 실제 착신 → 그리팅 → 운영자 전화 울림 → 통화</li>
+</ul>
+</div>
+
+<div class="phase">
+<h3><span class="tag tag-green">Phase 2</span>프리셋 클릭 재생 + 콘솔 최소 UI (예상 1–2일)</h3>
+<ul>
+  <li><code>/operator/calls</code>, <code>/play</code>, <code>/stop</code>, <code>/presets</code> + 샘플 프리셋 3개</li>
+  <li>콘솔 페이지: 콜 목록 + 프리셋 버튼 (SSE 연동)</li>
+  <li>여기서 "콘솔 → 브리지 재생" 경로 전체 검증</li>
+</ul>
+</div>
+
+<div class="phase">
+<h3><span class="tag tag-blue">Phase 3</span>텍스트박스 실시간 TTS 송출 (예상 1일)</h3>
+<ul>
+  <li>TTS 유틸 공용화 + <code>/say</code> + 텍스트박스·송출 이력 UI</li>
+  <li>예상 지연: 합성 0.5–1.5초 + 재생 시작 ~0.2초</li>
+</ul>
+</div>
+
+<div class="phase">
+<h3><span class="tag tag-blue">Phase 4</span>DTMF 표시 + 프리셋 관리 UI (예상 1일)</h3>
+<ul>
+  <li>DTMF 핸들러 확장 + 콘솔 실시간 표시</li>
+  <li>프리셋 생성(TTS)/업로드/삭제 관리 화면</li>
+</ul>
+</div>
+
+<h2>5. 리스크 및 주의사항</h2>
+<div class="warn-box">
+<ul>
+  <li><span class="tag tag-red">중요</span><b>개입 음성과 대화 겹침</b>: 재생 중 두 사람이 말하면 소리가 섞임(믹싱 브리지 특성).
+      운영자가 재생 타이밍을 통제하는 운용으로 해결하되, 콘솔에 "재생 중" 표시와 즉시 중지 버튼을 반드시 제공.</li>
+  <li><b>운영자 미응답</b>: ring_timeout + 폴백 동작을 Phase 1에서 확정. 발신자를 무한 대기시키지 않는다.</li>
+  <li><b>블라인드 전환 금지</b>: dialplan으로 내보내는 <code>_continue_to_dialplan</code> 경로를 타면 채널이 Stasis를
+      떠나 개입 불가 — 사람 연결 모드에서는 사용하지 않음.</li>
+  <li><b>90 운영서버(운영서버) 배포 주의</b>: 운영본. 로컬/스테이징 검증 후 통화 없는 시간대에 엔진 재시작.</li>
+  <li><b>pjsip dtmf_mode</b>: rfc4733/auto 확인(90 서버·테스트 환경 모두) — inband 전용이면 DTMF 이벤트 미도착.</li>
+</ul>
+</div>
+
+<h2>6. 권장 다음 단계</h2>
+<div class="next-box">
+<ol>
+  <li>운영자 내선 번호(dial string)와 미응답 시 동작(안내 후 종료/보이스메일) 확정</li>
+  <li>최초 그리팅 문구·목소리 확정(기존 greeting_file 재사용 여부 포함)</li>
+  <li>Phase 1 착수 → 로컬 검증 → 90 서버 배포는 별도 일정</li>
+</ol>
+</div>
+
+<div class="footer">
+  <span>AVA — AI Voice Agent for Asterisk</span>
+  <span>Report #004 · 2026-09-01</span>
+</div>
+
+</div>
+</body>
+</html>
